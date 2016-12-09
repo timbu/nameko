@@ -5,7 +5,7 @@ import sys
 import uuid
 import warnings
 from collections import deque
-from logging import getLogger
+from logging import getLogger, DEBUG
 
 import eventlet
 import six
@@ -14,7 +14,8 @@ from eventlet.greenpool import GreenPool
 from greenlet import GreenletExit  # pylint: disable=E0611
 from nameko.constants import (
     CALL_ID_STACK_CONTEXT_KEY, DEFAULT_MAX_WORKERS,
-    DEFAULT_PARENT_CALLS_TRACKED, DEFAULT_SERIALIZER, MAX_WORKERS_CONFIG_KEY,
+    DEFAULT_PARENT_CALLS_TRACKED, DEFAULT_SERIALIZER, DEFAULT_WORKER_GROUP,
+    MAX_WORKERS_CONFIG_KEY, MAX_WORKERS_PER_GROUP_CONFIG_KEY,
     PARENT_CALLS_CONFIG_KEY, SERIALIZER_CONFIG_KEY)
 from nameko.exceptions import ConfigurationError, ContainerBeingKilled
 from nameko.extensions import (
@@ -142,6 +143,9 @@ class ServiceContainer(object):
         self.max_workers = (
             config.get(MAX_WORKERS_CONFIG_KEY) or DEFAULT_MAX_WORKERS)
 
+        self.max_workers_per_group = config.get(
+            MAX_WORKERS_PER_GROUP_CONFIG_KEY)
+
         self.serializer = config.get(
             SERIALIZER_CONFIG_KEY, DEFAULT_SERIALIZER)
 
@@ -157,6 +161,8 @@ class ServiceContainer(object):
             self.dependencies.add(bound)
             self.subextensions.update(iter_extensions(bound))
 
+        self._worker_groups = {DEFAULT_WORKER_GROUP}
+
         for method_name, method in inspect.getmembers(service_cls, is_method):
             entrypoints = getattr(method, ENTRYPOINT_EXTENSIONS_ATTR, [])
             for entrypoint in entrypoints:
@@ -165,7 +171,11 @@ class ServiceContainer(object):
                 self.subextensions.update(iter_extensions(bound))
 
         self.started = False
-        self._worker_pool = GreenPool(size=self.max_workers)
+
+        self._worker_pools = {}
+        for group in self._worker_groups:
+            size = self.max_workers_per_group.get(group) or self.max_workers
+            self._worker_pools[group] = GreenPool(size=size)
 
         self._worker_threads = {}
         self._managed_threads = {}
@@ -238,7 +248,7 @@ class ServiceContainer(object):
 
             # there might still be some running workers, which we have to
             # wait for to complete before we can stop dependencies
-            self._worker_pool.waitall()
+            self._wait_for_worker_pools()
 
             # it should be safe now to stop any dependency as there is no
             # active worker which could be using it
@@ -320,6 +330,9 @@ class ServiceContainer(object):
         """
         return self._died.wait()
 
+    def register_worker_group(self, worker_group):
+        self._worker_groups.add(worker_group)
+
     def spawn_worker(self, entrypoint, args, kwargs,
                      context_data=None, handle_result=None):
         """ Spawn a worker thread for running the service method decorated
@@ -345,12 +358,20 @@ class ServiceContainer(object):
             self, service, entrypoint, args, kwargs, data=context_data)
 
         _log.debug('spawning %s', worker_ctx)
-        gt = self._worker_pool.spawn(
+        worker_pool = self._get_worker_pool_for_entrypoint(entrypoint)
+        gt = worker_pool.spawn(
             self._run_worker, worker_ctx, handle_result
         )
         gt.link(self._handle_worker_thread_exited, worker_ctx)
 
         self._worker_threads[worker_ctx] = gt
+
+        if _log.isEnabledFor(DEBUG):
+            for key, pool in self._worker_pools.items():
+                _log.debug(
+                    'worker-pool:%s has %s free of %s' % (
+                        key, pool.free(), pool.size))
+
         return worker_ctx
 
     def spawn_managed_thread(self, fn, protected=None, identifier=None):
@@ -382,6 +403,14 @@ class ServiceContainer(object):
         self._managed_threads[gt] = identifier
         gt.link(self._handle_managed_thread_exited, identifier)
         return gt
+
+    def _get_worker_pool_for_entrypoint(self, entrypoint):
+        key = entrypoint.worker_group or DEFAULT_WORKER_GROUP
+        return self._worker_pools[key]
+
+    def _wait_for_worker_pools(self):
+        for pool in self._worker_pools.values():
+            pool.waitall()
 
     def _run_worker(self, worker_ctx, handle_result):
         _log.debug('setting up %s', worker_ctx)

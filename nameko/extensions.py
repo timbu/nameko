@@ -263,6 +263,7 @@ def register_entrypoint(fn, entrypoint):
 class Entrypoint(Extension):
 
     method_name = None
+    worker_group = None
 
     def bind(self, container, method_name):
         """ Get an instance of this Entrypoint to bind to `container` with
@@ -270,6 +271,9 @@ class Entrypoint(Extension):
         """
         instance = super(Entrypoint, self).bind(container)
         instance.method_name = method_name
+        if instance.worker_group:
+            container.register_worker_group(instance.worker_group)
+
         return instance
 
     def check_signature(self, args, kwargs):
