@@ -128,9 +128,7 @@ class Rpc(Entrypoint, HeaderDecoder):
 
     rpc_consumer = RpcConsumer()
 
-    def __init__(
-        self, expected_exceptions=(), sensitive_variables=(), worker_group=None
-    ):
+    def __init__(self, expected_exceptions=(), sensitive_variables=()):
         """ Mark a method to be exposed over rpc
 
         :Parameters:
@@ -150,7 +148,6 @@ class Rpc(Entrypoint, HeaderDecoder):
         """
         self.expected_exceptions = expected_exceptions
         self.sensitive_variables = sensitive_variables
-        self.worker_group = worker_group
 
     def setup(self):
         self.rpc_consumer.register_provider(self)
